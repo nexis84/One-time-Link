@@ -5,7 +5,7 @@ Creates disposable download links that expire after first use.
 Uses in-memory storage (tokens lost on restart - acceptable for one-time use).
 """
 
-from flask import Flask, redirect, jsonify
+from flask import Flask, redirect, jsonify, request
 import secrets
 import os
 from datetime import datetime, timedelta
@@ -48,8 +48,8 @@ def generate_token():
 def generate_link():
     """Generate a new one-time download link."""
     token = generate_token()
-    # Use environment variable or default to localhost for testing
-    base_url = os.getenv('BASE_URL', 'http://localhost:5000')
+    # Auto-detect base URL from request
+    base_url = request.host_url.rstrip('/')
     download_link = f"{base_url}/d/{token}"
     return jsonify({
         'download_link': download_link,
