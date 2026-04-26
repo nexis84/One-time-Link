@@ -2,61 +2,32 @@
 """
 One-Time Download Link Generator
 Creates disposable download links that expire after first use.
-Uses PostgreSQL for persistent storage (Render-compatible).
+Uses in-memory storage (tokens lost on restart - acceptable for one-time use).
 """
 
 from flask import Flask, redirect, jsonify
 import secrets
 import os
 from datetime import datetime, timedelta
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
 # Configuration
-DATABASE_URL = os.getenv('DATABASE_URL')
 TARGET_URL = os.getenv('TARGET_URL', 'https://github.com/nexis84/Rusty-Client/releases/download/2.0.45/RustyBot_Setup_v2.0.45.0.exe')
 
-def get_db_connection():
-    """Get database connection."""
-    if DATABASE_URL:
-        return psycopg2.connect(DATABASE_URL)
-    # No database available - raise error
-    raise RuntimeError("DATABASE_URL not set. Please add a PostgreSQL database.")
-
-def init_db():
-    """Initialize database table."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS download_tokens (
-            token VARCHAR(32) PRIMARY KEY,
-            target_url TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP NOT NULL,
-            used BOOLEAN DEFAULT FALSE
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+# In-memory storage (tokens lost on restart)
+tokens = {}
 
 def cleanup_expired_tokens():
-    """Remove expired tokens from database."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM download_tokens WHERE expires_at < NOW()")
-    conn.commit()
-    cur.close()
-    conn.close()
+    """Remove expired tokens from memory."""
+    now = datetime.now()
+    expired_tokens = [token for token, data in tokens.items() if data['expires_at'] < now]
+    for token in expired_tokens:
+        del tokens[token]
 
 def generate_token():
     """Generate a new unique token."""
     cleanup_expired_tokens()
-    
-    conn = get_db_connection()
-    cur = conn.cursor()
     
     # Generate secure random token
     token = secrets.token_urlsafe(16)
@@ -64,13 +35,12 @@ def generate_token():
     # Set expiration (24 hours from now)
     expires_at = datetime.now() + timedelta(hours=24)
     
-    cur.execute(
-        "INSERT INTO download_tokens (token, target_url, expires_at) VALUES (%s, %s, %s)",
-        (token, TARGET_URL, expires_at)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    tokens[token] = {
+        'target_url': TARGET_URL,
+        'created_at': datetime.now(),
+        'expires_at': expires_at,
+        'used': False
+    }
     
     return token
 
@@ -90,30 +60,18 @@ def generate_link():
 @app.route('/d/<token>')
 def download(token):
     """Handle the download redirect."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cleanup_expired_tokens()
     
-    cur.execute(
-        "SELECT * FROM download_tokens WHERE token = %s AND expires_at > NOW()",
-        (token,)
-    )
-    token_data = cur.fetchone()
-    
-    if not token_data:
-        cur.close()
-        conn.close()
+    if token not in tokens:
         return jsonify({'error': 'Invalid or expired link'}), 404
     
+    token_data = tokens[token]
+    
     if token_data['used']:
-        cur.close()
-        conn.close()
         return jsonify({'error': 'Link already used'}), 410
     
     # Mark as used
-    cur.execute("UPDATE download_tokens SET used = TRUE WHERE token = %s", (token,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    tokens[token]['used'] = True
     
     # Redirect to actual download
     return redirect(token_data['target_url'])
@@ -121,24 +79,15 @@ def download(token):
 @app.route('/status/<token>')
 def check_status(token):
     """Check if a token is still valid."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cleanup_expired_tokens()
     
-    cur.execute(
-        "SELECT used, expires_at FROM download_tokens WHERE token = %s AND expires_at > NOW()",
-        (token,)
-    )
-    token_data = cur.fetchone()
-    cur.close()
-    conn.close()
-    
-    if not token_data:
+    if token not in tokens:
         return jsonify({'valid': False, 'reason': 'Not found or expired'})
     
     return jsonify({
         'valid': True,
-        'used': token_data['used'],
-        'expires_at': token_data['expires_at'].isoformat()
+        'used': tokens[token]['used'],
+        'expires_at': tokens[token]['expires_at'].isoformat()
     })
 
 @app.route('/health')
@@ -147,14 +96,6 @@ def health():
     return jsonify({'status': 'healthy'})
 
 if __name__ == '__main__':
-    # Initialize database
-    try:
-        init_db()
-        print("Database initialized successfully")
-    except Exception as e:
-        print(f"Warning: Could not initialize database: {e}")
-        print("Running without database (tokens won't persist)")
-    
     port = int(os.getenv('PORT', 5000))
     print("One-Time Download Link Server")
     print("=" * 40)
