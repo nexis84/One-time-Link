@@ -22,8 +22,8 @@ def get_db_connection():
     """Get database connection."""
     if DATABASE_URL:
         return psycopg2.connect(DATABASE_URL)
-    # Fallback to local SQLite for testing
-    return psycopg2.connect("dbname=postgres user=postgres password=postgres host=localhost")
+    # No database available - raise error
+    raise RuntimeError("DATABASE_URL not set. Please add a PostgreSQL database.")
 
 def init_db():
     """Initialize database table."""
