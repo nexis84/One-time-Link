@@ -25,15 +25,15 @@ def cleanup_expired_tokens():
     for token in expired_tokens:
         del tokens[token]
 
-def generate_token(target_url=None):
+def generate_token(target_url=None, max_uses=1, expire_hours=24):
     """Generate a new unique token."""
     cleanup_expired_tokens()
     
     # Generate secure random token
     token = secrets.token_urlsafe(16)
     
-    # Set expiration (24 hours from now)
-    expires_at = datetime.now() + timedelta(hours=24)
+    # Set expiration based on provided hours
+    expires_at = datetime.now() + timedelta(hours=expire_hours)
     
     # Use provided URL or fall back to default TARGET_URL
     url = target_url if target_url else TARGET_URL
@@ -42,7 +42,8 @@ def generate_token(target_url=None):
         'target_url': url,
         'created_at': datetime.now(),
         'expires_at': expires_at,
-        'used': False
+        'max_uses': max_uses,
+        'use_count': 0
     }
     
     return token
@@ -125,23 +126,33 @@ def index():
 </head>
 <body>
     <div class="container">
-        <h1>One-Time Download Link Generator</h1>
-        <p>Enter a URL to create a disposable download link that expires after first use.</p>
+        <h1>Download Link Generator</h1>
+        <p>Enter a URL to create a disposable download link with custom usage limits.</p>
         
         <div class="form-group">
             <label for="url">Target URL:</label>
             <input type="url" id="url" placeholder="https://example.com/file.zip" required>
         </div>
         
-        <button onclick="generateLink()">Generate One-Time Link</button>
+        <div class="form-group">
+            <label for="maxUses">Maximum Uses:</label>
+            <input type="number" id="maxUses" min="1" value="1" required>
+        </div>
+        
+        <div class="form-group">
+            <label for="expireHours">Expires In (hours):</label>
+            <input type="number" id="expireHours" min="1" value="24" required>
+        </div>
+        
+        <button onclick="generateLink()">Generate Download Link</button>
         
         <div class="result" id="result">
-            <strong>Your one-time download link:</strong><br>
+            <strong>Your download link:</strong><br>
             <a id="downloadLink" href="#" target="_blank"></a>
             <div class="note">
                 <strong>Target:</strong> <span id="targetUrl"></span><br>
-                <strong>Expires in:</strong> 24 hours<br>
-                <strong>One-time use:</strong> Yes
+                <strong>Max Uses:</strong> <span id="maxUsesDisplay"></span><br>
+                <strong>Expires In:</strong> <span id="expireHoursDisplay"></span> hours
             </div>
         </div>
     </div>
@@ -149,17 +160,32 @@ def index():
     <script>
         function generateLink() {
             const url = document.getElementById('url').value;
+            const maxUses = document.getElementById('maxUses').value;
+            const expireHours = document.getElementById('expireHours').value;
+            
             if (!url) {
                 alert('Please enter a URL');
                 return;
             }
             
-            fetch('/generate?url=' + encodeURIComponent(url))
+            if (!maxUses || maxUses < 1) {
+                alert('Please enter a valid maximum uses (minimum 1)');
+                return;
+            }
+            
+            if (!expireHours || expireHours < 1) {
+                alert('Please enter a valid expiration time (minimum 1 hour)');
+                return;
+            }
+            
+            fetch('/generate?url=' + encodeURIComponent(url) + '&max_uses=' + encodeURIComponent(maxUses) + '&expire_hours=' + encodeURIComponent(expireHours))
                 .then(response => response.json())
                 .then(data => {
                     document.getElementById('downloadLink').href = data.download_link;
                     document.getElementById('downloadLink').textContent = data.download_link;
                     document.getElementById('targetUrl').textContent = data.target_url;
+                    document.getElementById('maxUsesDisplay').textContent = data.max_uses;
+                    document.getElementById('expireHoursDisplay').textContent = data.expire_hours;
                     document.getElementById('result').style.display = 'block';
                 })
                 .catch(error => {
@@ -176,15 +202,20 @@ def generate_link():
     """Generate a new one-time download link."""
     # Get URL from query parameter, fall back to default TARGET_URL
     custom_url = request.args.get('url')
-    token = generate_token(custom_url)
+    # Get max_uses parameter, default to 1
+    max_uses = request.args.get('max_uses', default=1, type=int)
+    # Get expire_hours parameter, default to 24
+    expire_hours = request.args.get('expire_hours', default=24, type=int)
+    
+    token = generate_token(custom_url, max_uses, expire_hours)
     # Auto-detect base URL from request
     base_url = request.host_url.rstrip('/')
     download_link = f"{base_url}/d/{token}"
     return jsonify({
         'download_link': download_link,
         'target_url': custom_url if custom_url else TARGET_URL,
-        'expires_in': '24 hours',
-        'one_time_use': True
+        'max_uses': max_uses,
+        'expire_hours': expire_hours
     })
 
 @app.route('/d/<token>')
@@ -197,11 +228,12 @@ def download(token):
     
     token_data = tokens[token]
     
-    if token_data['used']:
-        return jsonify({'error': 'Link already used'}), 410
+    # Check if link has been used max_uses times
+    if token_data['use_count'] >= token_data['max_uses']:
+        return jsonify({'error': 'Link has reached maximum uses'}), 410
     
-    # Mark as used
-    tokens[token]['used'] = True
+    # Increment use count
+    tokens[token]['use_count'] += 1
     
     # Redirect to actual download
     return redirect(token_data['target_url'])
@@ -216,7 +248,8 @@ def check_status(token):
     
     return jsonify({
         'valid': True,
-        'used': tokens[token]['used'],
+        'use_count': tokens[token]['use_count'],
+        'max_uses': tokens[token]['max_uses'],
         'expires_at': tokens[token]['expires_at'].isoformat()
     })
 
